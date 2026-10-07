@@ -35,7 +35,26 @@ const parseApiResponse = async (response, fallbackError) => {
   }
 
   if (!response.ok) {
-    const detail = typeof data?.detail === "string" ? data.detail : JSON.stringify(data?.detail ?? data);
+    const renderGateway404 =
+      response.status === 404 &&
+      data &&
+      typeof data === "object" &&
+      data.error &&
+      typeof data.error === "object" &&
+      data.error.code === "404" &&
+      /the page could not be found/i.test(String(data.error.message || ""));
+
+    if (renderGateway404) {
+      throw new Error(
+        `${fallbackError} (404): The Render backend at ${API} did not run FastAPI. This almost always means Render is configured incorrectly. In Render Web Service settings, set Root Directory to "backend", Build Command to "pip install -r requirements.txt", and Start Command to "uvicorn main:app --host 0.0.0.0 --port $PORT". After redeploying Render, open ${API}/health in a browser until you see {"status":"ok","gemini_configured":true}, then redeploy Vercel.`
+      );
+    }
+
+    const detail =
+      typeof data?.detail === "string"
+        ? data.detail
+        : JSON.stringify(data?.detail ?? data);
+
     throw new Error(`${fallbackError} ${statusLabel}: ${detail}`);
   }
 
