@@ -13,26 +13,30 @@ const parseApiResponse = async (response, fallbackError) => {
 
   const trimmedText = rawText.trim();
   const looksLikeJson = trimmedText.startsWith("{") || trimmedText.startsWith("[");
+  const statusLabel = `(${response.status}${response.statusText ? " " + response.statusText : ""})`;
+
   if (!trimmedText || !contentType.includes("application/json") || !looksLikeJson) {
     const isHtmlGateway = /<html|<!doctype|<head/i.test(rawText);
     if (isHtmlGateway) {
-      throw new Error("The backend returned a hosting/gateway page instead of JSON. This usually means the backend URL is wrong, the service is still starting, or a proxy is intercepting the request.");
+      throw new Error(`Backend returned a hosting/gateway page instead of JSON ${statusLabel}. This usually means the backend URL is wrong, the service is still starting, or a proxy is intercepting the request. Check ${API}`);
     }
     if (!response.ok) {
-      throw new Error(rawText || fallbackError);
+      const snippet = trimmedText ? ` — ${trimmedText.slice(0, 160)}` : "";
+      throw new Error(`${fallbackError} ${statusLabel}${snippet}`);
     }
-    throw new Error(fallbackError);
+    throw new Error(`${fallbackError} ${statusLabel}`);
   }
 
   let data;
   try {
     data = JSON.parse(rawText);
   } catch {
-    throw new Error(fallbackError);
+    throw new Error(`${fallbackError} ${statusLabel} (invalid JSON from ${API})`);
   }
 
   if (!response.ok) {
-    throw new Error(data?.detail || fallbackError);
+    const detail = typeof data?.detail === "string" ? data.detail : JSON.stringify(data?.detail ?? data);
+    throw new Error(`${fallbackError} ${statusLabel}: ${detail}`);
   }
 
   return data;
@@ -45,6 +49,20 @@ function App() {
   const [answers, setAnswers] = useState({});
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
+
+  const formatNetworkError = (err, fallback) => {
+    const baseMsg = err?.message || fallback;
+    const looksLikeNetworkError =
+      err instanceof TypeError &&
+      (/failed to fetch|networkerror|cors|blocked|load failed/i.test(baseMsg) ||
+        !baseMsg);
+
+    if (looksLikeNetworkError) {
+      return `${fallback} Network error while calling ${API}. This is usually caused by CORS, incorrect API URL, or the backend service being unavailable.`;
+    }
+
+    return baseMsg;
+  };
 
   const generateExam = async (text) => {
     setError("");
@@ -65,7 +83,7 @@ function App() {
       setResult(null);
       setScreen("start");
     } catch (err) {
-      setError(err.message || "Network error. Please ensure the backend is running.");
+      setError(formatNetworkError(err, "Failed to generate exam."));
       setScreen("input");
     }
   };
@@ -81,7 +99,7 @@ function App() {
       setResult(data);
       setScreen("result");
     } catch (err) {
-      setError(err.message || "Network error during submission.");
+      setError(formatNetworkError(err, "Failed to submit exam."));
     }
   };
 
