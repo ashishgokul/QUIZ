@@ -1,8 +1,11 @@
 import os
 import json
 import re
-from fastapi import FastAPI, HTTPException
+import time
+from typing import Any, Dict, List, Optional
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from google import genai
@@ -19,11 +22,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-if not GEMINI_API_KEY:
-    raise RuntimeError("GEMINI_API_KEY not found in environment. Please set it in the .env file.")
 
-client = genai.Client(api_key=GEMINI_API_KEY)
+@app.exception_handler(Exception)
+async def fallback_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    if isinstance(exc, HTTPException):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail},
+        )
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error. Please try again later."},
+    )
+
+
+GEMINI_API_KEY: Optional[str] = os.getenv("GEMINI_API_KEY")
+client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 
 class GenerateRequest(BaseModel):
@@ -31,19 +45,65 @@ class GenerateRequest(BaseModel):
 
 
 class SubmitRequest(BaseModel):
-    questions: list
-    answers: dict
+    questions: List[Dict[str, Any]]
+    answers: Dict[str, Any]
+
+
+def _extract_json_object(text: str) -> Optional[Any]:
+    if not text:
+        return None
+
+    text = text.strip()
+
+    text = re.sub(r"^```(?:json)?\s*", "", text)
+    text = re.sub(r"\s*```$", "", text)
+    text = text.strip()
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    first_object = text.find("{")
+    last_object = text.rfind("}")
+    if first_object != -1 and last_object != -1 and last_object > first_object:
+        try:
+            return json.loads(text[first_object:last_object + 1])
+        except json.JSONDecodeError:
+            pass
+
+    first_array = text.find("[")
+    last_array = text.rfind("]")
+    if first_array != -1 and last_array != -1 and last_array > first_array:
+        try:
+            candidate = json.loads(text[first_array:last_array + 1])
+            return {"questions": candidate} if isinstance(candidate, list) else candidate
+        except json.JSONDecodeError:
+            pass
+
+    return None
 
 
 @app.get("/")
 def root():
-    return {"message": "AI Exam Generator API is running!"}
+    return {"message": "AI Exam Generator API is running!", "ok": True}
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "gemini_configured": bool(GEMINI_API_KEY)}
 
 
 @app.post("/generate-exam")
 def generate_exam(request: GenerateRequest):
     if not request.text or not request.text.strip():
         raise HTTPException(status_code=400, detail="Please paste some questions before generating the exam.")
+
+    if not client or not GEMINI_API_KEY:
+        raise HTTPException(
+            status_code=500,
+            detail="Backend is missing the GEMINI_API_KEY environment variable. Please configure it on Render and redeploy."
+        )
 
     prompt = f"""You are an expert exam question extraction and analysis system.
 
@@ -83,7 +143,6 @@ Return this exact structure:
 Input text to process:
 {request.text}"""
 
-    # Try models in priority order — fall back if one is overloaded
     MODELS = [
         "gemini-2.5-flash",
         "gemini-2.5-flash-lite",
@@ -91,46 +150,67 @@ Input text to process:
         "gemini-1.5-flash-8b",
     ]
 
-    last_error = None
+    last_error: Optional[str] = None
 
     for model_name in MODELS:
-        for attempt in range(3):  # up to 3 retries per model
+        for attempt in range(3):
             try:
                 response = client.models.generate_content(
                     model=model_name,
                     contents=prompt,
                 )
-                raw = response.text.strip()
+                raw = (response.text or "").strip()
 
-                # Strip markdown code fences if present
-                raw = re.sub(r"^```(?:json)?\s*", "", raw)
-                raw = re.sub(r"\s*```$", "", raw)
-                raw = raw.strip()
+                data = _extract_json_object(raw)
 
-                data = json.loads(raw)
+                if data is None:
+                    raise HTTPException(
+                        status_code=422,
+                        detail="The AI could not understand the question format. Please check your input and try again."
+                    )
+
+                if isinstance(data, list):
+                    data = {"questions": data}
 
                 if "questions" not in data or not isinstance(data["questions"], list):
-                    raise HTTPException(status_code=422, detail="The AI could not understand the question format. Please check your input and try again.")
+                    raise HTTPException(
+                        status_code=422,
+                        detail="The AI could not understand the question format. Please check your input and try again."
+                    )
 
-                if len(data["questions"]) == 0:
-                    raise HTTPException(status_code=422, detail="No valid multiple-choice questions were detected in the provided text.")
+                normalized_questions: List[Dict[str, Any]] = []
+                for idx, q in enumerate(data["questions"], start=1):
+                    if not isinstance(q, dict):
+                        continue
+                    question_text = str(q.get("question", "")).strip()
+                    options = q.get("options", {}) or {}
+                    correct_answer = str(q.get("correct_answer", "")).strip().upper()
+                    if not question_text or not isinstance(options, dict) or not options:
+                        continue
+                    normalized_questions.append({
+                        "id": q.get("id", idx),
+                        "question": question_text,
+                        "options": options,
+                        "correct_answer": correct_answer,
+                    })
 
-                return data
+                if len(normalized_questions) == 0:
+                    raise HTTPException(
+                        status_code=422,
+                        detail="No valid multiple-choice questions were detected in the provided text."
+                    )
 
-            except json.JSONDecodeError:
-                raise HTTPException(status_code=422, detail="The AI could not understand the question format. Please check your input and try again.")
+                return {"questions": normalized_questions}
+
             except HTTPException:
                 raise
             except Exception as e:
                 err_str = str(e)
                 last_error = err_str
-                # If it's overloaded (503) or rate-limited (429), wait and retry
                 if "503" in err_str or "UNAVAILABLE" in err_str or "429" in err_str or "quota" in err_str.lower():
-                    import time
-                    wait = 2 ** attempt  # 1s, 2s, 4s backoff
+                    wait = 2 ** attempt
                     time.sleep(wait)
-                    continue  # retry same model
-                # Any other error — skip to next model
+                    continue
                 break
 
     raise HTTPException(
@@ -144,16 +224,25 @@ def submit_exam(request: SubmitRequest):
     if not request.questions:
         raise HTTPException(status_code=400, detail="No questions provided.")
 
+    if not isinstance(request.answers, dict):
+        raise HTTPException(status_code=400, detail="Answers must be an object mapping question IDs to selected options.")
+
     total = len(request.questions)
     correct = 0
     wrong = 0
     unanswered = 0
-    results = []
+    results: List[Dict[str, Any]] = []
 
     for q in request.questions:
+        if not isinstance(q, dict):
+            continue
         q_id = str(q.get("id"))
-        correct_answer = q.get("correct_answer", "").strip().upper()
-        student_answer = request.answers.get(q_id, "").strip().upper() if q_id in request.answers else ""
+        correct_answer = str(q.get("correct_answer", "")).strip().upper()
+        student_answer = (
+            str(request.answers.get(q_id, "")).strip().upper()
+            if q_id in request.answers
+            else ""
+        )
 
         if not student_answer:
             status = "unanswered"
@@ -168,13 +257,14 @@ def submit_exam(request: SubmitRequest):
         results.append({
             "id": q.get("id"),
             "question": q.get("question"),
-            "options": q.get("options", {}),
+            "options": q.get("options", {}) or {},
             "correct_answer": correct_answer,
             "student_answer": student_answer if student_answer else None,
             "status": status,
         })
 
-    percentage = round((correct / total) * 100, 2) if total > 0 else 0
+    total_scored = len(results) or total
+    percentage = round((correct / total_scored) * 100, 2) if total_scored > 0 else 0
 
     return {
         "score": correct,
