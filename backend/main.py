@@ -4,6 +4,7 @@ import re
 import time
 from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError, StarletteHTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -23,12 +24,39 @@ app.add_middleware(
 )
 
 
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+    detail = exc.detail
+    if exc.status_code == 404:
+        detail = (
+            f"Not Found: {request.method} {request.url.path}. "
+            "Use GET /, GET /health, POST /generate-exam, or POST /submit-exam."
+        )
+    elif isinstance(detail, (dict, list)):
+        pass
+    elif not isinstance(detail, str):
+        detail = str(detail)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": detail},
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors()},
+    )
+
+
 @app.exception_handler(Exception)
 async def fallback_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     if isinstance(exc, HTTPException):
+        detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
         return JSONResponse(
             status_code=exc.status_code,
-            content={"detail": exc.detail},
+            content={"detail": detail},
         )
     return JSONResponse(
         status_code=500,
@@ -95,6 +123,7 @@ def health():
 
 
 @app.post("/generate-exam")
+@app.post("/generate-exam/")
 def generate_exam(request: GenerateRequest):
     if not request.text or not request.text.strip():
         raise HTTPException(status_code=400, detail="Please paste some questions before generating the exam.")
@@ -220,6 +249,7 @@ Input text to process:
 
 
 @app.post("/submit-exam")
+@app.post("/submit-exam/")
 def submit_exam(request: SubmitRequest):
     if not request.questions:
         raise HTTPException(status_code=400, detail="No questions provided.")

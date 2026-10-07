@@ -5,7 +5,8 @@ import ExamQuestion from "./components/ExamQuestion";
 import Result from "./components/Result";
 import "./index.css";
 
-const API = import.meta.env.VITE_API_URL;
+const rawApiUrl = import.meta.env.VITE_API_URL || "http://localhost:8000";
+const API = rawApiUrl.replace(/\/+$/, "");
 
 const parseApiResponse = async (response, fallbackError) => {
   const rawText = await response.text();
@@ -15,8 +16,8 @@ const parseApiResponse = async (response, fallbackError) => {
   const looksLikeJson = trimmedText.startsWith("{") || trimmedText.startsWith("[");
   const statusLabel = `(${response.status}${response.statusText ? " " + response.statusText : ""})`;
 
-  if (!trimmedText || !contentType.includes("application/json") || !looksLikeJson) {
-    const isHtmlGateway = /<html|<!doctype|<head/i.test(rawText);
+  const isHtmlGateway = /<html|<!doctype|<head/i.test(rawText);
+  if (!trimmedText || isHtmlGateway || (!looksLikeJson && !contentType.includes("application/json"))) {
     if (isHtmlGateway) {
       throw new Error(`Backend returned a hosting/gateway page instead of JSON ${statusLabel}. This usually means the backend URL is wrong, the service is still starting, or a proxy is intercepting the request. Check ${API}`);
     }
