@@ -5,7 +5,7 @@ import ExamQuestion from "./components/ExamQuestion";
 import Result from "./components/Result";
 import "./index.css";
 
-const API = "http://localhost:8000";
+const API = import.meta.env.VITE_API_URL;
 
 function App() {
   const [screen, setScreen] = useState("input"); // input | loading | start | exam | result
