@@ -5,8 +5,7 @@ import ExamQuestion from "./components/ExamQuestion";
 import Result from "./components/Result";
 import "./index.css";
 
-const rawApiUrl = import.meta.env.VITE_API_URL || "http://localhost:8000";
-const API = rawApiUrl.replace(/\/+$/, "");
+const API = "";
 
 const parseApiResponse = async (response, fallbackError) => {
   const rawText = await response.text();
@@ -78,7 +77,7 @@ function App() {
         !baseMsg);
 
     if (looksLikeNetworkError) {
-      return `${fallback} Network error while calling ${API}. This is usually caused by CORS, incorrect API URL, or the backend service being unavailable.`;
+      return `${fallback} Network error. This is usually caused by the backend service being unavailable.`;
     }
 
     return baseMsg;
@@ -88,7 +87,7 @@ function App() {
     setError("");
     setScreen("loading");
     try {
-      const response = await fetch(`${API}/generate-exam`, {
+      const response = await fetch(`/api/generate-exam`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Accept: "application/json" },
         body: JSON.stringify({ text }),
@@ -110,7 +109,7 @@ function App() {
 
   const submitExam = async () => {
     try {
-      const response = await fetch(`${API}/submit-exam`, {
+      const response = await fetch(`/api/submit-exam`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Accept: "application/json" },
         body: JSON.stringify({ questions, answers }),
